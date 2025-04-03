@@ -27,6 +27,12 @@ TASKS = {
         'template': """Some special magic {type_needle_v} are hidden within the following text. Make sure to memorize it. I will quiz you about the {type_needle_v} afterwards.\n{context}\nWhat are all the special magic {type_needle_v} for {query} mentioned in the provided text?""",
         'answer_prefix': """ The special magic {type_needle_v} for {query} mentioned in the provided text are"""
     },
+
+    'custom': {
+        'tokens_to_generate': 128,
+        'template': """{context}""",
+        'answer_prefix': ""
+    },
     
     'variable_tracking': {
         'tokens_to_generate': 30,
@@ -50,5 +56,11 @@ TASKS = {
         'tokens_to_generate': 32, 
         'template': """Answer the question based on the given documents. Only give me the answer and do not output any other words.\n\nThe following are given documents.\n\n{context}\n\nAnswer the question based on the given documents. Only give me the answer and do not output any other words.\n\nQuestion: {query}""",
         'answer_prefix': """ Answer:""",
+    },
+
+    'qa_custom': {
+        'tokens_to_generate': 32, 
+        'template': """{context}""",
+        'answer_prefix': "",
     },
 }

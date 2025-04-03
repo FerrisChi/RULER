@@ -36,9 +36,9 @@ from pathlib import Path
 from tqdm import tqdm
 import random
 import wonderwords
-import jsonlines
 # from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
 import sys
+import jsonlines
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")) 
 from tokenizer import select_tokenizer
 from nltk.tokenize import sent_tokenize
@@ -65,6 +65,7 @@ parser.add_argument("--num_needle_q", type=int, default=1)
 parser.add_argument("--type_haystack", type=str, default='essay', help='[Options] repeat, essay, needle.')
 parser.add_argument("--type_needle_k", type=str, default='words', help='[Options] numbers, words, uuids.')
 parser.add_argument("--type_needle_v", type=str, default='numbers', help='[Options] numbers, words, uuids.')
+parser.add_argument("--position", type=str, default='uniform', help='[Options] head (first 10k tokens), tail (last 10k tokens), uniform (evenly distributed).')
 
 args = parser.parse_args()
 random.seed(args.random_seed)
@@ -97,7 +98,7 @@ words = sorted(list(set(words)))
 
 
 # Positions
-DEPTHS = list(np.round(np.linspace(0, 100, num=40, endpoint=True)).astype(int))
+DEPTHS = list(np.round(np.linspace(0, 100, num=80, endpoint=True)).astype(int))
 
 
 def generate_random_number(num_digits=7):
@@ -142,16 +143,31 @@ def generate_input_output(num_haystack):
     if args.type_haystack == 'essay':
         text = " ".join(haystack[:num_haystack])
         document_sents = sent_tokenize(text.strip())
-        insertion_positions = [0] + \
-                              sorted([int(len(document_sents) * (depth / 100)) for depth in random.sample(DEPTHS, len(needles))]) + \
-                              [len(document_sents)]
+        total_sents = len(document_sents)
+        
+        # Position needles according to the specified setting
+        insertion_positions = get_insertion_positions(total_sents, needles, args.position)
+        
+        # Construct the final document with inserted needles
         document_sents_list = []
-        for i in range(1,len(insertion_positions)):
+        needle_idx = 0
+        
+        for i in range(1, len(insertion_positions)):
             last_pos = insertion_positions[i-1]
             next_pos = insertion_positions[i]
             document_sents_list.append(" ".join(document_sents[last_pos:next_pos]))
-            if i-1 < len(needles):
-                document_sents_list.append(needles[i-1])
+            
+            # Insert needle after each segment (except when we've used all needles)
+            if needle_idx < len(needles):
+                document_sents_list.append(needles[needle_idx])
+                needle_idx += 1
+        
+        # If we haven't inserted all needles (can happen in head/tail modes),
+        # append the remaining ones at the end
+        while needle_idx < len(needles):
+            document_sents_list.append(needles[needle_idx])
+            needle_idx += 1
+            
         context = " ".join(document_sents_list)
 
     else:
@@ -163,13 +179,9 @@ def generate_input_output(num_haystack):
                 key=generate_random(args.type_needle_k),
                 value=generate_random(args.type_needle_v),
             ) for _ in range(num_haystack)]
-
-            
-        indexes = sorted(random.sample(range(num_haystack), len(needles)), reverse=True)
-        for index, element in zip(indexes, needles):
-            sentences.insert(index, element)
-        context = "\n".join(sentences)
-
+        
+        # Apply position mode to repeat and needle haystack types
+        context = position_needles_in_nonessay(sentences, needles, args.position, num_haystack)
 
     ## Query and Answer
     indices = random.sample(range(args.num_needle_k), args.num_needle_q)
@@ -192,7 +204,59 @@ def generate_input_output(num_haystack):
         query=query,
     )
 
-    return input_text, answers
+    return input_text, queries, answers
+
+def get_insertion_positions(total_elements, needles, position_mode):
+    """
+    Get insertion positions based on position mode.
+    Works for both sentences (essay) and indexes (repeat/needle).
+    """
+    if position_mode == 'head':
+        # Place needles in the first 15% of content
+        head_depths = [depth * 0.15 for depth in DEPTHS]  # Scale depths to first 15%
+        insertion_positions = [0] + \
+                            sorted([int(total_elements * (depth / 100)) for depth in random.sample(head_depths, min(len(needles), len(head_depths)))]) + \
+                            [total_elements]
+    
+    elif position_mode == 'tail':
+        # Place needles in the last 15% of content
+        tail_depths = [85 + (depth * 0.15) for depth in DEPTHS]  # Scale depths to last 15%
+        insertion_positions = [0] + \
+                            sorted([int(total_elements * (depth / 100)) for depth in random.sample(tail_depths, min(len(needles), len(tail_depths)))]) + \
+                            [total_elements]
+    
+    else:  # uniform (default) - same as original random mode
+        insertion_positions = [0] + \
+                            sorted([int(total_elements * (depth / 100)) for depth in random.sample(DEPTHS, min(len(needles), len(DEPTHS)))]) + \
+                            [total_elements]
+    
+    return insertion_positions
+
+def position_needles_in_nonessay(sentences, needles, position_mode, num_haystack):
+    """
+    Position needles in non-essay haystack types (repeat and needle) according to specified mode.
+    """
+    # Get insertion positions based on the position mode
+    insertion_positions = get_insertion_positions(num_haystack, needles, position_mode)
+    
+    # Convert positions to indexes where we'll insert the needles
+    insertion_indexes = []
+    for i in range(1, len(insertion_positions) - 1):  # Skip first and last position
+        insertion_indexes.append(insertion_positions[i])
+    
+    # If we have more needles than positions (can happen with head/tail modes),
+    # add positions for the remaining needles at the end
+    while len(insertion_indexes) < len(needles):
+        insertion_indexes.append(num_haystack)
+    
+    # Sort indexes in reverse to avoid shifting when inserting
+    insertion_indexes = sorted(insertion_indexes[:len(needles)], reverse=True)
+    
+    # Insert needles at specified positions
+    for index, element in zip(insertion_indexes, needles):
+        sentences.insert(index, element)
+    
+    return "\n".join(sentences)
 
 
 def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incremental: int = 500):
@@ -200,7 +264,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
     tokens_to_generate = args.tokens_to_generate
 
     if args.type_haystack == 'essay':
-        incremental = 500
+        incremental = 100
     elif args.type_haystack == 'repeat':
         incremental = 25
     elif args.type_haystack == 'needle':
@@ -213,10 +277,10 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
         
     total_tokens = 0  # Track the total tokens generated for the first example
     while total_tokens + tokens_to_generate < max_seq_length :  
-        input_text, answer = generate_input_output(num_haystack)
+        input_text, query, answer = generate_input_output(num_haystack)
         # Calculate the number of tokens in the example
         total_tokens = len(TOKENIZER.text_to_tokens(input_text + ' '.join(answer)))
-        print(f'Max length {max_seq_length} | Current length {total_tokens + tokens_to_generate} | Haystack: {num_haystack}')
+        print(f'Target length {max_seq_length} | Current length {total_tokens + tokens_to_generate} | Haystack: {num_haystack}')
         if total_tokens + tokens_to_generate > max_seq_length:
             num_haystack -= incremental
             break
@@ -227,16 +291,17 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
         
         num_haystack += incremental
 
-    print('Num haystack:', num_haystack)
+    print('Num haystack:', num_haystack, len(haystack))
     
     # Generate samples
     for index in tqdm(range(num_samples)):
         used_haystack = num_haystack
         while(True):
             try:
-                input_text, answer  = generate_input_output(used_haystack)
+                input_text, query, answer  = generate_input_output(used_haystack)
                 length = len(TOKENIZER.text_to_tokens(input_text)) + tokens_to_generate
-                assert length <= max_seq_length, f"{length} exceeds max_seq_length."
+                # Check against max_seq_length
+                assert length <= max_seq_length, f"{length} exceeds max_seq_length {max_seq_length}."
                 break
             except:
                 if used_haystack > incremental:
@@ -248,6 +313,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
         formatted_output = {
             'index': index,
             "input": input_text,
+            "queries": query,
             "outputs": answer,
             "length": length,
         }
@@ -257,7 +323,7 @@ def generate_samples(num_samples: int, max_seq_length: int, save_dir: str, incre
 
 
 def main():
-    save_file = args.save_dir / f'{args.save_name}.jsonl'
+    save_file = args.save_dir / f'{args.save_name}' / f'{args.subset}.jsonl'
     save_file.parent.mkdir(parents=True, exist_ok=True)
 
     write_jsons = generate_samples(
@@ -268,6 +334,7 @@ def main():
 
     with jsonlines.open(save_file, mode='w') as writer:
         writer.write_all(write_jsons)
+
     # write_manifest(save_file, write_jsons)
 
 if __name__ == "__main__":
